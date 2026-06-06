@@ -5,23 +5,19 @@ import pandas as pd
 
 from ibkr_data.db import get_connection, load_ticker_df, resolve_tickers, write_candle_table
 
-logger = logging.getLogger("ibkr_data.resample")
+logger = logging.getLogger("ibkr_data.first_bar")
 
 
-def resample_to_daily(df: pd.DataFrame) -> pd.DataFrame:
-    daily = df.resample("1D", on="date").agg(
-        open=("open", "first"),
-        high=("high", "max"),
-        low=("low", "min"),
-        close=("close", "last"),
-        volume=("volume", "sum"),
-    ).dropna().reset_index()
-    daily["date"] = pd.to_datetime(daily["date"].dt.date)
-    return daily
+def extract_first_bars(df: pd.DataFrame) -> pd.DataFrame:
+    df["_day"] = df["date"].dt.date
+    first = df.groupby("_day", sort=False).first().reset_index()
+    first = first.drop(columns=["_day"])
+    first.columns = ["date", "open", "high", "low", "close", "volume"]
+    return first
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Resample 5-min candles to daily in SQLite")
+    parser = argparse.ArgumentParser(description="Extract the first 5-min bar of each day into its own table")
     parser.add_argument("--ticker", default=None, help="Ticker (default: all tickers in DB)")
     parser.add_argument("--db", default=None, nargs="?", const="")
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -42,8 +38,8 @@ def main():
             logger.warning("%s: no 5-min data found, skipping", ticker)
             continue
         logger.info("%s: loaded %d rows (%s to %s)", ticker, len(df), df["date"].min(), df["date"].max())
-        daily = resample_to_daily(df)
-        write_candle_table(daily, ticker, db_conn, timeframe="1d")
+        first_bars = extract_first_bars(df)
+        write_candle_table(first_bars, ticker, db_conn, timeframe="5m_first")
 
     db_conn.close()
 

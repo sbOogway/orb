@@ -13,6 +13,8 @@ dependencies = [
 
 [project.scripts]
 fetch-candles = "ibkr_data.cli:main"
+import-data = "ibkr_data.import_csv:main"
+first-bar = "ibkr_data.first_bar:main"
 resample-daily = "ibkr_data.resample:main"
 compare-yf = "ibkr_data.compare_yf:main"
 

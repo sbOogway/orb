@@ -1,6 +1,6 @@
-"""Shared SQLite market data store.
+"""SQLite market data store for candle data.
 
-Table naming: {TICKER}_{source}_{timeframe} for candle data, e.g. TSLA_ibkr_5m.
+Table naming: {source}_{TICKER}_{timeframe} for candle data, e.g. ibkr_TSLA_5m.
 Plus cache and tickers metadata tables.
 """
 
@@ -10,7 +10,7 @@ from typing import Optional
 
 import pandas as pd
 
-DB_PATH = Path(__file__).resolve().parent / "market_data.db"
+DB_PATH = Path(__file__).resolve().parent.parent.parent / "market_data.db"
 SOURCE_NAMES = frozenset({"ibkr", "yf", "polygon"})
 
 
@@ -26,7 +26,7 @@ def get_connection(db_path: str | Path | None = None) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------
-#  Candle tables  ({TICKER}_{source}_{timeframe})
+#  Candle tables  ({source}_{TICKER}_{timeframe})
 # ---------------------------------------------------------------------------
 
 def table_name(ticker: str, source: str = "ibkr", timeframe: str = "5m") -> str:
@@ -135,8 +135,36 @@ def load_ticker_df(
     if df.empty:
         return df
     df = df.rename(columns={"ts": "date"})
-    df["date"] = pd.to_datetime(df["date"], utc=True)
+    df["date"] = pd.to_datetime(df["date"], utc=True, format="ISO8601")
     return df
+
+
+def resolve_tickers(db_conn, ticker_arg: str | None = None) -> list[str]:
+    """Return tickers from the --ticker argument or the tickers table."""
+    if ticker_arg:
+        return [ticker_arg.upper()]
+    ensure_tickers_table(db_conn)
+    tickers = get_tickers(db_conn)
+    return tickers
+
+
+def write_candle_table(df: pd.DataFrame, ticker: str, db_conn, source: str = "ibkr", timeframe: str = "1d"):
+    """Write a DataFrame with columns date,open,high,low,close,volume to a candle table."""
+    tbl = f"{source}_{ticker.upper()}_{timeframe}"
+    ensure_candle_table(db_conn, ticker, source, timeframe)
+
+    rows = df[["date", "open", "high", "low", "close", "volume"]].copy()
+    rows = rows.rename(columns={"date": "ts"})
+    rows["ts"] = rows["ts"].dt.strftime("%Y-%m-%dT%H:%M:%S")
+    rows["volume"] = rows["volume"].astype(int)
+
+    db_conn.executemany(
+        f"INSERT OR REPLACE INTO [{tbl}] (ts,open,high,low,close,volume) VALUES (?,?,?,?,?,?)",
+        rows.itertuples(index=False, name=None),
+    )
+    db_conn.commit()
+    import logging
+    logging.getLogger("ibkr_data.db").info("  wrote %d rows to [%s]", len(rows), tbl)
 
 
 # ---------------------------------------------------------------------------
