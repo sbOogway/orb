@@ -7,6 +7,7 @@ requires-python = ">=3.14"
 dependencies = [
     "ib-insync>=0.9.86",
     "pandas>=3.0.3",
+    "polygon-api-client>=1.16.3",
     "yfinance>=1.4.1",
 ]
 
