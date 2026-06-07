@@ -1,17 +1,14 @@
 """SQLite market data store for candle data.
 
 Table naming: {source}_{TICKER}_{timeframe} for candle data, e.g. ibkr_TSLA_5m.
-Plus cache and tickers metadata tables.
 """
 
 import sqlite3
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
 DB_PATH = Path(__file__).resolve().parent.parent.parent / "market_data.db"
-SOURCE_NAMES = frozenset({"ibkr", "yf", "polygon"})
 
 
 # ---------------------------------------------------------------------------
@@ -45,67 +42,14 @@ def ensure_candle_table(conn: sqlite3.Connection, ticker: str, source: str = "ib
             volume INTEGER NOT NULL
         );
     """)
-
-
-def import_csv(
-    csv_path: str | Path,
-    conn: sqlite3.Connection,
-    ticker: str,
-    source: str = "ibkr",
-    timeframe: str = "5m",
-) -> int:
-    """Import a single CSV into its candle table. Returns rows inserted."""
-    tbl = table_name(ticker, source, timeframe)
-    ensure_candle_table(conn, ticker, source, timeframe)
-
-    df = pd.read_csv(csv_path)
-    df.columns = [c.strip().lower() for c in df.columns]
-    if "date" in df.columns:
-        df = df.rename(columns={"date": "ts"})
-
-    cols = ["ts", "open", "high", "low", "close", "volume"]
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        return 0
-
-    sub = df[cols].copy()
-    sub["volume"] = sub["volume"].astype(int)
-
-    conn.executemany(
-        f"INSERT OR REPLACE INTO [{tbl}] (ts,open,high,low,close,volume) VALUES (?,?,?,?,?,?)",
-        sub.itertuples(index=False, name=None),
-    )
-    conn.commit()
-    return len(sub)
-
-
-def scan_and_import(data_dir: str | Path, db_path: str | Path | None = None) -> dict[str, int]:
-    """Scan CSV folder, import everything into candle tables. Returns {table: row_count}."""
-    totals: dict[str, int] = {}
-    root = Path(data_dir)
-    conn = get_connection(db_path)
-
-    for ticker_dir in sorted(root.iterdir()):
-        if not ticker_dir.is_dir():
-            continue
-        ticker = ticker_dir.name.upper()
-        for year_dir in sorted(ticker_dir.iterdir()):
-            if not year_dir.is_dir() or not year_dir.name.isdigit():
-                continue
-            for month_dir in sorted(year_dir.iterdir()):
-                if not month_dir.is_dir():
-                    continue
-                for day_dir in sorted(month_dir.iterdir()):
-                    for csv_path in day_dir.glob("*.csv"):
-                        source = csv_path.stem
-                        if source not in SOURCE_NAMES:
-                            continue
-                        rows = import_csv(csv_path, conn, ticker, source)
-                        tbl = table_name(ticker, source)
-                        totals[tbl] = totals.get(tbl, 0) + rows
-
-    conn.close()
-    return totals
+    if timeframe == "5m":
+        conn.executescript(f"""
+            CREATE TRIGGER IF NOT EXISTS block_deletes_on_{tbl}
+            BEFORE DELETE ON [{tbl}]
+            BEGIN
+                SELECT RAISE(FAIL, 'Deletion is not allowed on this table.');
+            END;
+        """)
 
 
 def load_ticker_df(
@@ -149,72 +93,31 @@ def resolve_tickers(db_conn, ticker_arg: str | None = None) -> list[str]:
 
 
 def write_candle_table(df: pd.DataFrame, ticker: str, db_conn, source: str = "ibkr", timeframe: str = "1d"):
-    """Write a DataFrame with columns date,open,high,low,close,volume to a candle table."""
+    """Write a DataFrame with date/open/high/low/close/volume plus optional indicator columns."""
     tbl = f"{source}_{ticker.upper()}_{timeframe}"
     ensure_candle_table(db_conn, ticker, source, timeframe)
 
-    rows = df[["date", "open", "high", "low", "close", "volume"]].copy()
+    rows = df.copy()
     rows = rows.rename(columns={"date": "ts"})
     rows["ts"] = rows["ts"].dt.strftime("%Y-%m-%dT%H:%M:%S")
-    rows["volume"] = rows["volume"].astype(int)
+    if "volume" in rows.columns:
+        rows["volume"] = rows["volume"].astype(int)
+
+    existing_cols = {row[1] for row in db_conn.execute(f"PRAGMA table_info([{tbl}])")}
+    for col in rows.columns:
+        if col not in existing_cols:
+            db_conn.execute(f"ALTER TABLE [{tbl}] ADD COLUMN [{col}] REAL")
+
+    col_list = ",".join(f"[{c}]" for c in rows.columns)
+    placeholders = ",".join("?" for _ in rows.columns)
 
     db_conn.executemany(
-        f"INSERT OR REPLACE INTO [{tbl}] (ts,open,high,low,close,volume) VALUES (?,?,?,?,?,?)",
+        f"INSERT OR REPLACE INTO [{tbl}] ({col_list}) VALUES ({placeholders})",
         rows.itertuples(index=False, name=None),
     )
     db_conn.commit()
     import logging
     logging.getLogger("ibkr_data.db").info("  wrote %d rows to [%s]", len(rows), tbl)
-
-
-# ---------------------------------------------------------------------------
-#  Cache table  (tracks what days have been scraped)
-# ---------------------------------------------------------------------------
-
-def ensure_cache_table(conn: sqlite3.Connection):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS cache (
-            ticker    TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            day       TEXT NOT NULL,
-            source    TEXT NOT NULL DEFAULT 'ibkr',
-            PRIMARY KEY (ticker, timeframe, day, source)
-        )
-    """)
-
-
-def is_day_cached(conn: sqlite3.Connection, ticker: str, day: str, timeframe: str = "5m", source: str = "ibkr") -> bool:
-    cur = conn.execute(
-        "SELECT 1 FROM cache WHERE ticker=? AND timeframe=? AND day=? AND source=?",
-        (ticker.upper(), timeframe, day, source),
-    )
-    return cur.fetchone() is not None
-
-
-def mark_day_cached(conn: sqlite3.Connection, ticker: str, day: str, timeframe: str = "5m", source: str = "ibkr"):
-    conn.execute(
-        "INSERT OR IGNORE INTO cache (ticker, timeframe, day, source) VALUES (?, ?, ?, ?)",
-        (ticker.upper(), timeframe, day, source),
-    )
-    conn.commit()
-
-
-def clear_day_cache(conn: sqlite3.Connection, ticker: str, day: str, timeframe: str = "5m", source: str = "ibkr"):
-    conn.execute(
-        "DELETE FROM cache WHERE ticker=? AND timeframe=? AND day=? AND source=?",
-        (ticker.upper(), timeframe, day, source),
-    )
-    conn.commit()
-
-
-def clear_ticker_cache(conn: sqlite3.Connection, ticker: str):
-    """Delete ALL cache entries for a ticker."""
-    conn.execute("DELETE FROM cache WHERE ticker=?", (ticker.upper(),))
-    conn.commit()
-
-
-def count_cached(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
 
 
 # ---------------------------------------------------------------------------
@@ -231,13 +134,11 @@ def ensure_tickers_table(conn: sqlite3.Connection):
     """)
 
 
-def upsert_tickers(conn: sqlite3.Connection, tickers: list[tuple[str, str, str]]):
-    """Insert or update tickers. Each tuple is (symbol, name, sector)."""
-    conn.executemany(
-        "INSERT OR REPLACE INTO tickers (symbol, name, sector) VALUES (?, ?, ?)",
-        tickers,
-    )
-    conn.commit()
+def count_5m_tickers(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "select count(*) from sqlite_schema where type='table' and name like 'ibkr_%_5m'"
+    ).fetchone()
+    return row[0]
 
 
 def get_tickers(conn: sqlite3.Connection, sector: str | None = None) -> list[str]:

@@ -2,21 +2,11 @@ import argparse
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 
 import pandas as pd
+import pandas_market_calendars as mcal
 
-from ibkr_data.db import (
-    get_connection,
-    ensure_candle_table,
-    ensure_cache_table,
-    is_day_cached,
-    mark_day_cached,
-    clear_ticker_cache,
-    get_tickers,
-    ensure_tickers_table,
-    count_cached,
-)
+from ibkr_data.db import get_connection, ensure_candle_table, table_name, get_tickers, ensure_tickers_table
 
 logger = logging.getLogger("ibkr_data")
 
@@ -32,6 +22,9 @@ _MAX_CHUNK_DAYS = {
     "1 day": 365,
 }
 
+_SOURCE = "ibkr"
+_TIMEFRAME = "5m"
+
 
 def _to_utc(dt):
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -41,10 +34,27 @@ def _chunk_days(bar_size: str) -> int:
     return _MAX_CHUNK_DAYS.get(bar_size, 7)
 
 
-def _write_bars_to_db(df: pd.DataFrame, ticker: str, db_conn, source: str = "ibkr", timeframe: str = "5m"):
-    """Write bars directly to the candle table, bypassing CSV files."""
-    tbl = f"{source}_{ticker.upper()}_{timeframe}"
-    ensure_candle_table(db_conn, ticker, source, timeframe)
+def _date_range_covered(ticker: str, db_conn, start: datetime, end: datetime) -> bool:
+    """Return True if every trading day between start and end has some bars."""
+    tbl = table_name(ticker, _SOURCE, _TIMEFRAME)
+    try:
+        cur = db_conn.execute(
+            f"SELECT COUNT(DISTINCT DATE(ts)) FROM [{tbl}] WHERE ts >= ? AND ts < ?",
+            (start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")),
+        )
+        existing = cur.fetchone()[0]
+    except Exception:
+        return False
+
+    cal = mcal.get_calendar("NYSE")
+    schedule = cal.schedule(start_date=start.date(), end_date=(end - timedelta(days=1)).date())
+    expected = len(schedule)
+    return existing >= expected if expected > 0 else False
+
+
+def _write_bars_to_db(df: pd.DataFrame, ticker: str, db_conn):
+    tbl = table_name(ticker, _SOURCE, _TIMEFRAME)
+    ensure_candle_table(db_conn, ticker, _SOURCE, _TIMEFRAME)
 
     rows = df[["date", "open", "high", "low", "close", "volume"]].copy()
     rows = rows.rename(columns={"date": "ts"})
@@ -57,10 +67,6 @@ def _write_bars_to_db(df: pd.DataFrame, ticker: str, db_conn, source: str = "ibk
     )
     db_conn.commit()
 
-    # mark all days in the batch as cached
-    for d in rows["ts"].str[:10].unique():
-        mark_day_cached(db_conn, ticker, d, timeframe, source)
-
     logger.info("  wrote %d rows to [%s]", len(rows), tbl)
 
 
@@ -68,7 +74,6 @@ def fetch(ticker: str, start: datetime, end: datetime, bar_size: str, host: str,
     import ib_insync as ibi
 
     chunk_d = _chunk_days(bar_size)
-    now = _to_utc(datetime.utcnow())
     target_earliest = _to_utc(start)
 
     ib = ibi.IB()
@@ -89,16 +94,7 @@ def fetch(ticker: str, start: datetime, end: datetime, bar_size: str, host: str,
         effective_start = max(chunk_start, target_earliest)
         total_chunks += 1
 
-        # ---- cache check: skip if every day in this range is cached ----
-        cursor = effective_start
-        all_cached = True
-        while cursor < end_dt:
-            if not is_day_cached(db_conn, ticker, cursor.strftime("%Y-%m-%d")):
-                all_cached = False
-                break
-            cursor += timedelta(days=1)
-
-        if all_cached:
+        if _date_range_covered(ticker, db_conn, effective_start, end_dt):
             chunk_num += 1
             skipped += 1
             logger.info("Chunk %d/%d — %s to %s (cached, skip)", chunk_num, total_chunks, effective_start.date(), end_dt.date())
@@ -131,7 +127,6 @@ def fetch(ticker: str, start: datetime, end: datetime, bar_size: str, host: str,
         df = df.sort_values("date").reset_index(drop=True)
         _write_bars_to_db(df, ticker, db_conn)
 
-        # advance to the oldest bar in this chunk
         end_dt = _to_utc(bars[0].date)
 
     ib.disconnect()
@@ -158,14 +153,13 @@ def main():
     parser.add_argument("--port", type=int, default=7496)
     parser.add_argument("--client-id", type=int, default=1)
     parser.add_argument("--db", default=None, nargs="?", const="", help="SQLite DB path (default: market_data.db in project root)")
-    parser.add_argument("--force", action="store_true", help="Drop table + clear cache before fetching")
+    parser.add_argument("--force", action="store_true", help="Drop table before fetching")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
 
     db_conn = get_connection(args.db if args.db else None)
-    ensure_cache_table(db_conn)
 
     now = datetime.now(timezone.utc)
     end_dt = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc) if args.end else now
@@ -178,10 +172,9 @@ def main():
     if args.ticker:
         tickers = [args.ticker.upper()]
         if args.force:
-            tbl = f"ibkr_{args.ticker.upper()}_5m"
+            tbl = table_name(args.ticker.upper(), _SOURCE, _TIMEFRAME)
             db_conn.execute(f"DROP TABLE IF EXISTS [{tbl}]")
-            clear_ticker_cache(db_conn, args.ticker)
-            logger.info("--force: dropped table [%s] and cleared cache for %s", tbl, args.ticker)
+            logger.info("--force: dropped table [%s]", tbl)
     else:
         ensure_tickers_table(db_conn)
         tickers = get_tickers(db_conn)
@@ -194,21 +187,8 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    # quick scan: sample ~1yr of cache days
-    check_days = min(int((end_dt - start_dt).days * 5 / 7), 365)
-
     for ticker in tickers:
-        cursor = start_dt
-        fully_cached = True
-        checked = 0
-        while cursor < end_dt and checked < check_days:
-            if not is_day_cached(db_conn, ticker, cursor.strftime("%Y-%m-%d"), timeframe="5m"):
-                fully_cached = False
-                break
-            cursor += timedelta(days=1)
-            checked += 1
-
-        if fully_cached:
+        if _date_range_covered(ticker, db_conn, start_dt, end_dt):
             logger.info("%s: fully cached, skipping", ticker)
             continue
 
@@ -218,10 +198,4 @@ def main():
             args.host, args.port, args.client_id, db_conn,
         )
 
-    cached = count_cached(db_conn)
-    logger.info("DB cache now has %d entries.", cached)
     db_conn.close()
-
-
-if __name__ == "__main__":
-    main()

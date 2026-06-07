@@ -7,16 +7,14 @@ requires-python = ">=3.14"
 dependencies = [
     "ib-insync>=0.9.86",
     "pandas>=3.0.3",
-    "polygon-api-client>=1.16.3",
-    "yfinance>=1.4.1",
+    "pandas-market-calendars>=4.5.1",
+    "quantstats>=0.0.81",
+    "ta>=0.11.0",
 ]
 
 [project.scripts]
 fetch-candles = "ibkr_data.cli:main"
-import-data = "ibkr_data.import_csv:main"
-first-bar = "ibkr_data.first_bar:main"
-resample-daily = "ibkr_data.resample:main"
-compare-yf = "ibkr_data.compare_yf:main"
+post-processing = "ibkr_data.post_processing:main"
 
 [tool.uv]
 package = true
