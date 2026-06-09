@@ -16,6 +16,7 @@ dependencies = [
 [project.scripts]
 fetch-candles = "ibkr_data.cli:main"
 post-processing = "ibkr_data.post_processing:main"
+backtest-single = "ibkr_data.cli:single_stock_main"
 
 [tool.uv]
 package = true

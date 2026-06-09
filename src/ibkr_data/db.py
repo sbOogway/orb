@@ -133,10 +133,21 @@ def ensure_tickers_table(conn: sqlite3.Connection):
             market_cap REAL
         )
     """)
-    # Add market_cap column if it doesn't exist (legacy tables)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(tickers)")}
-    if "market_cap" not in cols:
-        conn.execute("ALTER TABLE tickers ADD COLUMN market_cap REAL")
+    _add_cols(conn, "tickers", [
+        ("market_cap", "REAL"),
+        ("backtest_sharpe", "REAL"),
+        ("backtest_total_return", "REAL"),
+        ("backtest_max_drawdown", "REAL"),
+        ("backtest_trade_count", "INTEGER"),
+        ("backtest_total_fees", "REAL"),
+    ])
+
+
+def _add_cols(conn: sqlite3.Connection, table: str, cols: list[tuple[str, str]]):
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info([{table}])")}
+    for name, typ in cols:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE [{table}] ADD COLUMN {name} {typ}")
 
 
 def count_5m_tickers(conn: sqlite3.Connection) -> int:

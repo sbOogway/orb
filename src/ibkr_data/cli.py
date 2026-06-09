@@ -199,3 +199,58 @@ def main():
         )
 
     db_conn.close()
+
+
+def single_stock_main():
+    """Run a single-stock backtest and save tearsheet + DB results."""
+    parser = argparse.ArgumentParser(description="Single-stock backtest")
+    parser.add_argument("--ticker", default=None, help="Ticker (default: all tickers with 5m data)")
+    parser.add_argument("--db", default=None, nargs="?", const="")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--slippage", type=float, default=0.0001)
+    parser.add_argument("--risk", type=float, default=0.01)
+    parser.add_argument("--atr-distance", type=float, default=0.1)
+    parser.add_argument("--rv", type=float, default=2.0, help="Relative volume threshold")
+    parser.add_argument("--output", default="backtests/single", help="Output directory")
+    args = parser.parse_args()
+
+    setup_logging(args.verbose)
+
+    from ibkr_data.backtest import (
+        get_market_days,
+        fetch_tickers,
+        run_single_stock_backtest,
+        save_single_stock_results,
+    )
+
+    conn = get_connection(args.db if args.db else None)
+    market_days = get_market_days()
+    bt_start = market_days[0]
+    bt_end = market_days[-1]
+
+    if args.ticker:
+        tickers = [args.ticker.upper()]
+    else:
+        tickers, _ = fetch_tickers(conn, order_by="symbol", limit=9999)
+
+    kwargs = dict(
+        slippage=args.slippage,
+        risk_per_trade=args.risk,
+        atr_distance=args.atr_distance,
+        relative_volume_threshold=args.rv,
+    )
+
+    logger.info("Backtesting %d ticker(s) one at a time ...", len(tickers))
+    for ticker in tickers:
+        logger.info("── %s ──", ticker)
+        result = run_single_stock_backtest(conn, ticker, market_days, **kwargs)
+        logger.info(
+            "  trades=%d  total_fees=$%.2f  final_value=$%.2f",
+            result["trade_count"],
+            result["total_fees"],
+            result["equity"][-1]["portfolio_value"],
+        )
+        save_single_stock_results(conn, ticker, result, output_dir=args.output, start_date=bt_start, end_date=bt_end)
+        logger.info("  tearsheet + DB updated")
+
+    conn.close()
