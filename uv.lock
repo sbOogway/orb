@@ -255,6 +255,7 @@ dependencies = [
     { name = "pandas-market-calendars" },
     { name = "quantstats" },
     { name = "ta" },
+    { name = "yfinance" },
 ]
 
 [package.metadata]
@@ -264,6 +265,7 @@ requires-dist = [
     { name = "pandas-market-calendars", specifier = ">=4.5.1" },
     { name = "quantstats", specifier = ">=0.0.81" },
     { name = "ta", specifier = ">=0.11.0" },
+    { name = "yfinance", specifier = ">=0.2.0" },
 ]
 
 [[package]]

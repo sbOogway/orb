@@ -5,7 +5,7 @@ import re
 import pandas as pd
 
 from ibkr_data.db import get_connection, load_ticker_df, resolve_tickers, write_candle_table
-from ibkr_data.indicators import atr, average_volume, relative_volume
+from ibkr_data.indicators import WINDOW, atr, average_volume, relative_volume
 
 logger = logging.getLogger("ibkr_data.post_processing")
 
@@ -29,6 +29,32 @@ def resample_to_daily(df: pd.DataFrame) -> pd.DataFrame:
     ).dropna().reset_index()
     daily["date"] = pd.to_datetime(daily["date"].dt.date)
     return daily
+
+
+def update_market_cap(ticker: str, db_conn):
+    """Fetch market cap from Yahoo Finance and update the tickers table."""
+    import yfinance as yf
+
+    try:
+        info = yf.Ticker(ticker).info
+        mc = info.get("marketCap")
+    except Exception as e:
+        logger.debug("%s: yfinance failed — %s", ticker, e)
+        return
+
+    if mc is None or mc <= 0:
+        logger.warning("%s: marketCap not available", ticker)
+        return
+
+    cols = {row[1] for row in db_conn.execute("PRAGMA table_info(tickers)")}
+    if "market_cap" not in cols:
+        db_conn.execute("ALTER TABLE tickers ADD COLUMN market_cap REAL")
+
+    db_conn.execute(
+        "UPDATE tickers SET market_cap = ? WHERE symbol = ?",
+        (mc, ticker),
+    )
+    logger.info("%s: market_cap = %.2fB", ticker, mc / 1e9)
 
 
 def main():
@@ -83,14 +109,23 @@ def main():
 
         if do_resample:
             daily = resample_to_daily(df)
-            daily["atr"] = atr(daily)
-            daily["average_volume"] = average_volume(daily)
-            write_candle_table(daily, ticker, db_conn, timeframe="1d")
+            if len(daily) < WINDOW:
+                logger.warning("%s: only %d daily rows (need %d for ATR), skipping", ticker, len(daily), WINDOW)
+            else:
+                daily["atr"] = atr(daily)
+                daily["average_volume"] = average_volume(daily)
+                write_candle_table(daily, ticker, db_conn, timeframe="1d")
 
         if do_first_bar:
             first_bars = extract_first_bars(df)
-            first_bars["relative_volume"] = relative_volume(first_bars)
-            write_candle_table(first_bars, ticker, db_conn, timeframe="5m_first")
+            if len(first_bars) < WINDOW:
+                logger.warning("%s: only %d first-bar rows (need %d for rel vol), skipping", ticker, len(first_bars), WINDOW)
+            else:
+                first_bars["relative_volume"] = relative_volume(first_bars)
+                write_candle_table(first_bars, ticker, db_conn, timeframe="5m_first")
+
+        update_market_cap(ticker, db_conn)
+        db_conn.commit()
 
     db_conn.close()
 

@@ -18,9 +18,10 @@ CREATE TABLE IF NOT EXISTS cache (
 
 -- Reference universe of tradeable tickers
 CREATE TABLE IF NOT EXISTS tickers (
-    symbol TEXT PRIMARY KEY,
-    name   TEXT,
-    sector TEXT
+    symbol     TEXT PRIMARY KEY,
+    name       TEXT,
+    sector     TEXT,
+    market_cap REAL
 );
 
 -- ---------------------------------------------------------------------------

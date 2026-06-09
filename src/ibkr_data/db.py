@@ -127,11 +127,16 @@ def write_candle_table(df: pd.DataFrame, ticker: str, db_conn, source: str = "ib
 def ensure_tickers_table(conn: sqlite3.Connection):
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tickers (
-            symbol TEXT PRIMARY KEY,
-            name   TEXT,
-            sector TEXT
+            symbol     TEXT PRIMARY KEY,
+            name       TEXT,
+            sector     TEXT,
+            market_cap REAL
         )
     """)
+    # Add market_cap column if it doesn't exist (legacy tables)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(tickers)")}
+    if "market_cap" not in cols:
+        conn.execute("ALTER TABLE tickers ADD COLUMN market_cap REAL")
 
 
 def count_5m_tickers(conn: sqlite3.Connection) -> int:
